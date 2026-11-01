@@ -27,13 +27,43 @@ D:\Program Files\Microsoft Edge\
 - 启动方式按优先级识别：`App\msedge.exe` 直启 / `*.bat` 启动脚本 / `*.lnk` 快捷方式（文件名动态列出，不硬编码中文名）
 - 扩展检测在用户数据目录下查找 `*/Extensions/emacgiaaaiojkkpkddmmdfhmokgmnikg`（覆盖 Default、Profile 1 等所有 profile）
 
-## 二、bsk CLI 安装（iex 拦截的绕行方案）
+## 二、bsk CLI 安装（国内网络：镜像优先）
+
+### 为什么必须做镜像
+
+官方 `install.ps1` 内部把 `https://github.com` **写死在代码里**（只暴露 `BSK_REPO` / `BSK_VERSION` / `BSK_INSTALL_DIR` 三个环境变量，改不了域名），所以无法用"前缀代理"加速它自身的下载。国内直连 GitHub 常见 `ERR_CONNECTION_CLOSED` / 长时间超时。
+
+本技能自带 `scripts/install_bsk_mirror.ps1`，**复刻官方安装逻辑但全部走镜像**，并保留回退。
+
+### 方案 A（首选）：镜像安装脚本
+
+```powershell
+# 标准安装（自动选最快镜像）
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk_mirror.ps1"
+
+# 只探测镜像连通性，不安装（排障用）
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk_mirror.ps1" -CheckOnly
+
+# 固定版本
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk_mirror.ps1" -Version 0.4.0
+```
+
+脚本行为：
+
+1. 依次用镜像下载 `version.json` → 解析最新版本号与 `windows-x64` 的 SHA256
+2. 依次用镜像下载 `bsk-v<版本>-x86_64-pc-windows-msvc.zip`，**每个镜像独立超时**（默认 25s），失败或校验不符自动换下一个
+3. 全部镜像失败 → 自动回退 GitHub 原始地址（`origin`）
+4. 解压 → 停旧 daemon（best effort）→ 替换 `~/.local/bin/bsk.exe`（带重试，防文件锁）→ 写用户 PATH 与 `~/.bashrc` → 验证 `--version`
+5. 输出最终使用的源（`source=`），便于排障
+
+### 方案 B（回退）：官方安装脚本（需较稳定的 GitHub 直连）
 
 WorkBuddy 安全策略会拦截 `Invoke-Expression`（别名 `iex`），官方文档的 `irm ... | iex` 一行式安装**会直接报错**。正确做法：
 
 ```powershell
-# 1. 下载脚本到本地（下载不执行，安全）
+# 1. 下载脚本到本地（下载不执行，安全）；超时的话用 raw 类镜像取同一文件
 irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 -OutFile "$env:TEMP\bsk_install.ps1"
+# 镜像备选：https://cdn.gh-proxy.org/https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1
 
 # 2. 人工/智能体审查脚本内容（约 11KB，确认只下载+校验+解压+写 PATH）
 
@@ -44,18 +74,59 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\bsk_install.ps1"
 & "$env:USERPROFILE\.local\bin\bsk.exe" --version
 ```
 
-安装脚本内部行为（审查要点）：
+### 技能涉及的全部 GitHub 下载环节（5 处）
 
-- 从 `https://github.com/Tencent/BrowserSkill/releases/latest/download/version.json` 取最新版本号
-- 下载 `bsk-v<版本>-x86_64-pc-windows-msvc.zip` 并校验 SHA256
-- 解压 `bsk.exe` 到 `~/.local/bin`（即 `C:\Users\<用户>\.local\bin\bsk.exe`）
-- 写入用户 PATH（PowerShell/cmd）和 `~/.bashrc`（Git Bash）
+| # | 环节 | 原始地址 | 类型 | 加速方式 |
+|---|---|---|---|---|
+| 1 | install.ps1 安装脚本 | `raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1` | Raw | Raw 类镜像前缀 |
+| 2 | version.json 版本清单 | `github.com/Tencent/BrowserSkill/releases/latest/download/version.json` | Release | Release 类镜像前缀 |
+| 3 | bsk 主程序 zip | `github.com/Tencent/BrowserSkill/releases/download/cli-v{ver}/bsk-v{ver}-x86_64-pc-windows-msvc.zip` | Release | Release 类镜像前缀（方案 A 已内置） |
+| 4 | 技能自身分发包 zip | `github.com/2286927/browserskill-greenedge-setup/releases/download/v1.0.0/BrowserSkill绿装Edge接入技能.zip` | Release | 手动加前缀，例如 `https://cdn.gh-proxy.org/` + 原地址 |
+| 5 | git clone 仓库 | `github.com/2286927/browserskill-greenedge-setup.git` | Clone | Clone 类镜像前缀或域名镜像 |
 
-注意事项：
+**拼接规则**（前缀型镜像通用）：`目标地址 = 镜像前缀 + 原始 URL 的 PathAndQuery`
+例：`https://cdn.gh-proxy.org/https://github.com/Tencent/BrowserSkill/releases/latest/download/version.json`
 
-- 实测版本：bsk 0.4.0（2026-10 验证）
+### 镜像清单（来源：XIU2/UserScript GithubEnhanced-High-Speed-Download）
+
+**Release / zip 类**（`mirror-lib.ps1` 中按此顺序尝试）：
+
+1. `https://cdn.gh-proxy.org/https://github.com`（Fastly CDN，实测最快）
+2. `https://gh-proxy.org/https://github.com`
+3. `https://hk.gh-proxy.org/https://github.com`（香港）
+4. `https://ghproxy.net/https://github.com`
+5. `https://wget.la/https://github.com`
+6. `https://ghfast.top/https://github.com`
+
+**Raw 类**：
+
+1. `https://cdn.gh-proxy.org/https://raw.githubusercontent.com`
+2. `https://hk.gh-proxy.org/https://raw.githubusercontent.com`
+3. `https://wget.la/https://raw.githubusercontent.com`
+4. `https://ghfast.top/https://raw.githubusercontent.com`
+
+**Git clone 类**：
+
+1. `https://hk.gh-proxy.org/https://github.com`
+2. `https://ghfast.top/https://github.com`
+3. `https://githubfast.com`
+4. `https://gitclone.com/github.com`
+
+**实测参考（2026-11-01，中国大陆家宽）**：`cdn.gh-proxy.org` 330ms（最快）、直连 origin 759ms、`hk.gh-proxy.org` 764ms、`wget.la` 771ms；`ghfast.top` 当次连接被关闭（已下调顺序但保留）。
+
+### 镜像失效时怎么处理
+
+1. 跑 `-CheckOnly` 看哪条通、哪条挂（输出含耗时与错误）
+2. 打开 `scripts/mirror-lib.ps1`，调整 `$script:ReleaseMirrors` / `$script:RawMirrors` / `$script:CloneMirrors` 的顺序，或替换成新镜像（保留"前缀 + 原 URL 路径"格式）
+3. 镜像全挂时脚本会自动回退 `origin`（GitHub 直连）；若直连也不通再走方案 B 或等网络恢复
+4. 镜像列表可定期对照上游更新：`https://raw.githubusercontent.com/XIU2/UserScript/master/GithubEnhanced-High-Speed-Download.user.js`
+
+### 注意事项
+
+- 实测版本：bsk 0.4.0（2026-10/11 验证）
 - 安装脚本会先尝试 `daemon stop`（防止替换运行中的 exe）；新机上无 daemon，此步直接通过
 - **新开 shell 的 PATH 可能未刷新，所有 bsk 调用一律用绝对路径**，或确认 PATH 已含 `~/.local/bin`
+- 镜像只代理下载流量，**不改变文件内容**；SHA256 校验来自官方 version.json，可放心使用
 
 ## 三、daemon 托管启动（WorkBuddy 宿主约束）
 
@@ -96,6 +167,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\bsk_install.ps1"
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
+| 访问 `github.com` / `raw.githubusercontent.com` 超时或 `ERR_CONNECTION_CLOSED` | 国内网络对 GitHub 不稳定 | 不要直连：用 `scripts/install_bsk_mirror.ps1`（镜像优先，自动回退） |
+| `install_bsk_mirror.ps1` 报 "all mirrors + origin failed" | 所有镜像与直连同时不可用 | 跑 `-CheckOnly` 确认；换网络/等恢复；或手动加新镜像到 `mirror-lib.ps1` |
+| 某个镜像下载到一半报 "意外的 EOF" | 该镜像连接被中断 | 脚本会自动切下一个；无需人工干预，留意最终 `source=` 即可 |
+| 镜像返回 404 | 镜像不支持该路径格式，或原始文件不存在 | 先用 `-CheckOnly` 验证镜像本身；确认原始 URL 正确 |
+| SHA256 校验不符 | 镜像缓存了旧文件或内容被篡改 | 脚本会自动换镜像重试；若持续失败，改用官方 install.ps1 直连下载 |
 | `irm \| iex` 报 "Command blocked for security: iex" | WorkBuddy 安全策略拦截 Invoke-Expression | 按第二节流程：下载→审查→`-ExecutionPolicy Bypass -File` 执行 |
 | doctor 报 daemon "os error 5" / Job Object breakaway | 宿主禁止 daemon 独立脱离 | 用托管后台任务 + `--foreground`，不要重试独立启动 |
 | `bsk` 命令找不到 | 新 shell PATH 未刷新 | 一律用绝对路径 `~/.local/bin/bsk.exe`（Bash 下 `/c/Users/<用户>/.local/bin/bsk.exe`） |
