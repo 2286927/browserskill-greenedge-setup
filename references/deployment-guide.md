@@ -27,20 +27,24 @@ D:\Program Files\Microsoft Edge\
 - 启动方式按优先级识别：`App\msedge.exe` 直启 / `*.bat` 启动脚本 / `*.lnk` 快捷方式（文件名动态列出，不硬编码中文名）
 - 扩展检测在用户数据目录下查找 `*/Extensions/emacgiaaaiojkkpkddmmdfhmokgmnikg`（覆盖 Default、Profile 1 等所有 profile）
 
-## 二、bsk CLI 安装（默认直连 + 可选镜像）
+## 二、bsk CLI 安装（官方直连优先 + 镜像回退）
 
-### 设计原则（v1.1.1 安全整改记录）
+### 设计原则（v1.1.2）
 
-v1.1.0 被 SkillHub 安全扫描判为「可疑风险」（安全健康度 55；科恩实验室、云鼎实验室均判「可疑」，恶意行为检出 0）。原因是：从第三方 GitHub 代理下载、SHA256 期望值取自同一代理通道、且缺校验时跳过校验。v1.1.1 按平台 4 条建议整改：
+v1.1.0 被 SkillHub 安全扫描判为「可疑风险」（安全健康度 55；科恩、云鼎两家实验室均判「可疑」，恶意行为检出 0），原因是：从第三方代理下载、SHA256 期望值取自同一代理通道、缺校验时跳过校验。
 
-| 平台建议 | v1.1.1 落实 |
+v1.1.2 的做法是**在修复这些问题的同时保住国内可用性**——因为国内直连 GitHub 经常不可达，只允许直连等于技能无法安装：
+
+| 安全要求 | v1.1.2 落实 |
 |---|---|
-| 默认仅从官方 GitHub 直连下载 | `install_bsk.ps1` 默认只走 `origin`，不经过任何代理 |
-| 镜像需固定 SHA256，移除高危代理 | 包内 `$KnownSha256` 固定官方制品校验值；已移除被情报标记的域名 |
-| 缺 sha256 直接失败退出 | 包内无固定值且 manifest 无值 → 直接 `throw`，绝不跳过校验 |
-| 安装后展示下载源与校验结果 | 打印 source / expected / actual / verified 四项完整报告 |
+| 官方源优先 | 默认顺序是 **官方直连 →（失败才）镜像**，官方永远第一顺位 |
+| 制品完整性独立于下载通道 | 包内 `$KnownSha256` 固定官方制品 SHA256；镜像即便返回被篡改的文件，也一定校验失败 |
+| 缺校验值不得继续 | 包内无固定值且 manifest 无值 → 直接 `throw` |
+| 移除高危代理 | 已删除被威胁情报标记的域名（`cdn.gh-proxy.org` m=8、`ghfast.top` m=8、`hk.gh-proxy.org` m=5） |
+| 过程可审计 | 打印 source / expected / actual / verified 四项完整报告 |
+| 可强制最严格模式 | `-DirectOnly` 完全禁用镜像 |
 
-### 默认方式：官方直连（推荐）
+### 默认方式：官方直连优先，失败回退镜像（推荐）
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk.ps1"
@@ -48,25 +52,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/insta
 
 行为：
 
-1. 直连 `github.com/Tencent/BrowserSkill` 获取 `version.json` 与制品 zip
-2. **期望 SHA256 优先取包内 `$KnownSha256`**（当前固定 bsk 0.4.0 = `6feeb22e608e63e3049b2611cf48fce73daac2420945c35174c16e784cdb2677`），锚点独立于下载通道
-3. 校验不符立即中止，不换源、不降级
-4. 打印完整性报告 → 解压 → 停旧 daemon → 替换二进制 → 写 PATH/`.bashrc`
-5. 最后仅执行 `bsk --version` 验证可用
+1. 先直连 `github.com/Tencent/BrowserSkill` 取 `version.json` 与制品 zip
+2. 直连不通（超时/被阻断）才按顺序尝试镜像
+3. **期望 SHA256 一律取包内 `$KnownSha256`**（当前固定 bsk 0.4.0 = `6feeb22e608e63e3049b2611cf48fce73daac2420945c35174c16e784cdb2677`），与下载通道无关
+4. 校验不符立即中止，不换源、不降级
+5. 打印完整性报告 → 解压 → 停旧 daemon → 替换二进制 → 写 PATH/`.bashrc`
+6. 最后仅执行 `bsk --version` 验证可用
 
-### 可选方式：镜像加速（`-UseMirror`，较低信任通道）
-
-仅在直连确实不可用时使用：
+### 两种显式模式
 
 ```powershell
+# 国内 GitHub 极慢/被封：镜像优先，官方放最后（最快）
 powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk.ps1" -UseMirror
-powershell ... -CheckOnly          # 只探测镜像连通性，不安装
-powershell ... -Version 0.4.0      # 固定版本
+
+# 最严格：只允许官方直连，任何镜像都不用
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk.ps1" -DirectOnly
+
+# 只探测各源连通性，不安装（排障）
+powershell ... -CheckOnly
+# 固定版本
+powershell ... -Version 0.4.0
 ```
 
-- 镜像按顺序尝试，全部失败才回退直连
-- 镜像下载的制品**仍必须匹配包内固定 SHA256** 才会被采用
-- 第三方代理属较低信任通道，使用前请知悉
+- 无论哪种模式，制品都**必须匹配包内固定 SHA256** 才会被采用
+- 镜像只是传输通道，不参与信任判断
 
 ### 镜像域名清单（v1.1.1 已移除高危项）
 
