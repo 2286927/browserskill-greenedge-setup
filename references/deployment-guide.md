@@ -27,47 +27,75 @@ D:\Program Files\Microsoft Edge\
 - 启动方式按优先级识别：`App\msedge.exe` 直启 / `*.bat` 启动脚本 / `*.lnk` 快捷方式（文件名动态列出，不硬编码中文名）
 - 扩展检测在用户数据目录下查找 `*/Extensions/emacgiaaaiojkkpkddmmdfhmokgmnikg`（覆盖 Default、Profile 1 等所有 profile）
 
-## 二、bsk CLI 安装（国内网络：镜像优先）
+## 二、bsk CLI 安装（默认直连 + 可选镜像）
 
-### 为什么必须做镜像
+### 设计原则（v1.1.1 安全整改记录）
 
-官方 `install.ps1` 内部把 `https://github.com` **写死在代码里**（只暴露 `BSK_REPO` / `BSK_VERSION` / `BSK_INSTALL_DIR` 三个环境变量，改不了域名），所以无法用"前缀代理"加速它自身的下载。国内直连 GitHub 常见 `ERR_CONNECTION_CLOSED` / 长时间超时。
+v1.1.0 被 SkillHub 安全扫描判为「可疑风险」（安全健康度 55；科恩实验室、云鼎实验室均判「可疑」，恶意行为检出 0）。原因是：从第三方 GitHub 代理下载、SHA256 期望值取自同一代理通道、且缺校验时跳过校验。v1.1.1 按平台 4 条建议整改：
 
-本技能自带 `scripts/install_bsk_mirror.ps1`，**复刻官方安装逻辑但全部走镜像**，并保留回退。
+| 平台建议 | v1.1.1 落实 |
+|---|---|
+| 默认仅从官方 GitHub 直连下载 | `install_bsk.ps1` 默认只走 `origin`，不经过任何代理 |
+| 镜像需固定 SHA256，移除高危代理 | 包内 `$KnownSha256` 固定官方制品校验值；已移除被情报标记的域名 |
+| 缺 sha256 直接失败退出 | 包内无固定值且 manifest 无值 → 直接 `throw`，绝不跳过校验 |
+| 安装后展示下载源与校验结果 | 打印 source / expected / actual / verified 四项完整报告 |
 
-### 方案 A（首选）：镜像安装脚本
+### 默认方式：官方直连（推荐）
 
 ```powershell
-# 标准安装（自动选最快镜像）
-powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk_mirror.ps1"
-
-# 只探测镜像连通性，不安装（排障用）
-powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk_mirror.ps1" -CheckOnly
-
-# 固定版本
-powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk_mirror.ps1" -Version 0.4.0
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk.ps1"
 ```
 
-脚本行为：
+行为：
 
-1. 依次用镜像下载 `version.json` → 解析最新版本号与 `windows-x64` 的 SHA256
-2. 依次用镜像下载 `bsk-v<版本>-x86_64-pc-windows-msvc.zip`，**每个镜像独立超时**（默认 25s），失败或校验不符自动换下一个
-3. 全部镜像失败 → 自动回退 GitHub 原始地址（`origin`）
-4. 解压 → 停旧 daemon（best effort）→ 替换 `~/.local/bin/bsk.exe`（带重试，防文件锁）→ 写用户 PATH 与 `~/.bashrc` → 验证 `--version`
-5. 输出最终使用的源（`source=`），便于排障
+1. 直连 `github.com/Tencent/BrowserSkill` 获取 `version.json` 与制品 zip
+2. **期望 SHA256 优先取包内 `$KnownSha256`**（当前固定 bsk 0.4.0 = `6feeb22e608e63e3049b2611cf48fce73daac2420945c35174c16e784cdb2677`），锚点独立于下载通道
+3. 校验不符立即中止，不换源、不降级
+4. 打印完整性报告 → 解压 → 停旧 daemon → 替换二进制 → 写 PATH/`.bashrc`
+5. 最后仅执行 `bsk --version` 验证可用
 
-### 方案 B（回退）：官方安装脚本（需较稳定的 GitHub 直连）
+### 可选方式：镜像加速（`-UseMirror`，较低信任通道）
 
-WorkBuddy 安全策略会拦截 `Invoke-Expression`（别名 `iex`），官方文档的 `irm ... | iex` 一行式安装**会直接报错**。正确做法：
+仅在直连确实不可用时使用：
 
 ```powershell
-# 1. 下载脚本到本地（下载不执行，安全）；超时的话用 raw 类镜像取同一文件
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk.ps1" -UseMirror
+powershell ... -CheckOnly          # 只探测镜像连通性，不安装
+powershell ... -Version 0.4.0      # 固定版本
+```
+
+- 镜像按顺序尝试，全部失败才回退直连
+- 镜像下载的制品**仍必须匹配包内固定 SHA256** 才会被采用
+- 第三方代理属较低信任通道，使用前请知悉
+
+### 镜像域名清单（v1.1.1 已移除高危项）
+
+**保留**：
+
+| 用途 | 域名 |
+|---|---|
+| Release / zip | `gh-proxy.org`、`ghproxy.net`、`wget.la` |
+| Raw | `gh-proxy.org`、`wget.la` |
+
+**已移除**（2026-11-01 腾讯威胁情报标记，勿再加回）：
+
+| 域名 | 情报计数 |
+|---|---|
+| `cdn.gh-proxy.org` | m=8 |
+| `ghfast.top` | m=8 |
+| `hk.gh-proxy.org` | m=5 |
+
+### 兜底方式：官方安装脚本
+
+WorkBuddy 安全策略会拦截 `Invoke-Expression`（别名 `iex`），官方文档的 `irm ... | iex` 一行式安装**会直接报错**；本技能也**禁止**使用一行式执行（不可预审）。
+
+```powershell
+# 1. 下载脚本到本地（下载不执行）
 irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 -OutFile "$env:TEMP\bsk_install.ps1"
-# 镜像备选：https://cdn.gh-proxy.org/https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1
 
-# 2. 人工/智能体审查脚本内容（约 11KB，确认只下载+校验+解压+写 PATH）
+# 2. 审查该脚本内容（约 11KB，确认只做下载+校验+解压+写 PATH）
 
-# 3. 以 Bypass 策略执行脚本文件（脚本本身不含 iex，不会触发拦截）
+# 3. 审查后再以 Bypass 策略执行
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\bsk_install.ps1"
 
 # 4. 绝对路径验证
@@ -76,49 +104,45 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\bsk_install.ps1"
 
 ### 技能涉及的全部 GitHub 下载环节（5 处）
 
-| # | 环节 | 原始地址 | 类型 | 加速方式 |
+| # | 环节 | 原始地址 | 类型 | 默认行为 |
 |---|---|---|---|---|
-| 1 | install.ps1 安装脚本 | `raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1` | Raw | Raw 类镜像前缀 |
-| 2 | version.json 版本清单 | `github.com/Tencent/BrowserSkill/releases/latest/download/version.json` | Release | Release 类镜像前缀 |
-| 3 | bsk 主程序 zip | `github.com/Tencent/BrowserSkill/releases/download/cli-v{ver}/bsk-v{ver}-x86_64-pc-windows-msvc.zip` | Release | Release 类镜像前缀（方案 A 已内置） |
-| 4 | 技能自身分发包 zip | `github.com/2286927/browserskill-greenedge-setup/releases/download/v1.0.0/BrowserSkill绿装Edge接入技能.zip` | Release | 手动加前缀，例如 `https://cdn.gh-proxy.org/` + 原地址 |
-| 5 | git clone 仓库 | `github.com/2286927/browserskill-greenedge-setup.git` | Clone | Clone 类镜像前缀或域名镜像 |
+| 1 | install.ps1 安装脚本 | `raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1` | Raw | 直连（兜底方式） |
+| 2 | version.json 版本清单 | `github.com/Tencent/BrowserSkill/releases/latest/download/version.json` | Release | 直连 |
+| 3 | bsk 主程序 zip | `github.com/Tencent/BrowserSkill/releases/download/cli-v{ver}/bsk-v{ver}-x86_64-pc-windows-msvc.zip` | Release | 直连 + 包内固定 SHA256 校验 |
+| 4 | 技能自身分发包 zip | `github.com/2286927/browserskill-greenedge-setup/releases/download/v1.1.1/BrowserSkill绿装Edge接入技能.zip` | Release | 直连 |
+| 5 | git clone 仓库 | `github.com/2286927/browserskill-greenedge-setup.git` | Clone | 直连 |
 
-**拼接规则**（前缀型镜像通用）：`目标地址 = 镜像前缀 + 原始 URL 的 PathAndQuery`
-例：`https://cdn.gh-proxy.org/https://github.com/Tencent/BrowserSkill/releases/latest/download/version.json`
+**可选加速（仅手工或 `-UseMirror` 时）**：拼接规则为 `目标地址 = 镜像前缀 + 原始 URL 的 PathAndQuery`
+例：`https://gh-proxy.org/https://github.com/Tencent/BrowserSkill/releases/latest/download/version.json`
 
-### 镜像清单（来源：XIU2/UserScript GithubEnhanced-High-Speed-Download）
+### 镜像清单（v1.1.1：仅保留未被情报标记的域名）
 
-**Release / zip 类**（`mirror-lib.ps1` 中按此顺序尝试）：
+**Release / zip 类**（`mirror-lib.ps1` 中的尝试顺序）：
 
-1. `https://cdn.gh-proxy.org/https://github.com`（Fastly CDN，实测最快）
-2. `https://gh-proxy.org/https://github.com`
-3. `https://hk.gh-proxy.org/https://github.com`（香港）
-4. `https://ghproxy.net/https://github.com`
-5. `https://wget.la/https://github.com`
-6. `https://ghfast.top/https://github.com`
+1. `https://gh-proxy.org/https://github.com`
+2. `https://ghproxy.net/https://github.com`
+3. `https://wget.la/https://github.com`
 
 **Raw 类**：
 
-1. `https://cdn.gh-proxy.org/https://raw.githubusercontent.com`
-2. `https://hk.gh-proxy.org/https://raw.githubusercontent.com`
-3. `https://wget.la/https://raw.githubusercontent.com`
-4. `https://ghfast.top/https://raw.githubusercontent.com`
+1. `https://gh-proxy.org/https://raw.githubusercontent.com`
+2. `https://wget.la/https://raw.githubusercontent.com`
 
-**Git clone 类**：
+**Clone 类**（仅文档参考，供手工 `git clone`）：
 
-1. `https://hk.gh-proxy.org/https://github.com`
-2. `https://ghfast.top/https://github.com`
-3. `https://githubfast.com`
-4. `https://gitclone.com/github.com`
+1. `https://gh-proxy.org/https://github.com`
+2. `https://githubfast.com`
+3. `https://gitclone.com/github.com`
 
-**实测参考（2026-11-01，中国大陆家宽）**：`cdn.gh-proxy.org` 330ms（最快）、直连 origin 759ms、`hk.gh-proxy.org` 764ms、`wget.la` 771ms；`ghfast.top` 当次连接被关闭（已下调顺序但保留）。
+> **已移除的域名**（2026-11-01 腾讯威胁情报标记，恢复前请先查声誉）：
+> `cdn.gh-proxy.org`（m=8）、`ghfast.top`（m=8）、`hk.gh-proxy.org`（m=5）
 
 ### 镜像失效时怎么处理
 
-1. 跑 `-CheckOnly` 看哪条通、哪条挂（输出含耗时与错误）
-2. 打开 `scripts/mirror-lib.ps1`，调整 `$script:ReleaseMirrors` / `$script:RawMirrors` / `$script:CloneMirrors` 的顺序，或替换成新镜像（保留"前缀 + 原 URL 路径"格式）
-3. 镜像全挂时脚本会自动回退 `origin`（GitHub 直连）；若直连也不通再走方案 B 或等网络恢复
+1. 用 `-UseMirror -CheckOnly` 看哪条通、哪条挂（输出含耗时与错误）
+2. 编辑 `scripts/mirror-lib.ps1` 的 `$script:ReleaseMirrors` / `$script:RawMirrors`（保持"前缀 + 原 URL 路径"格式）
+3. 镜像全挂时脚本自动回退 `origin`；直连也不通则走兜底的官方安装脚本
+4. **不要为连通性加入未经验证的代理域名**——这正是 v1.1.0 被安全审核拒绝的原因
 4. 镜像列表可定期对照上游更新：`https://raw.githubusercontent.com/XIU2/UserScript/master/GithubEnhanced-High-Speed-Download.user.js`
 
 ### 注意事项
@@ -167,8 +191,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\bsk_install.ps1"
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 访问 `github.com` / `raw.githubusercontent.com` 超时或 `ERR_CONNECTION_CLOSED` | 国内网络对 GitHub 不稳定 | 不要直连：用 `scripts/install_bsk_mirror.ps1`（镜像优先，自动回退） |
-| `install_bsk_mirror.ps1` 报 "all mirrors + origin failed" | 所有镜像与直连同时不可用 | 跑 `-CheckOnly` 确认；换网络/等恢复；或手动加新镜像到 `mirror-lib.ps1` |
+| 访问 `github.com` / `raw.githubusercontent.com` 超时或 `ERR_CONNECTION_CLOSED` | 国内网络对 GitHub 不稳定 | 默认直连失败后，加 `-UseMirror` 使用可选镜像：`scripts/install_bsk.ps1 -UseMirror` |
+| 加 `-UseMirror` 后仍报 "download failed on every allowed source" | 镜像与直连同时不可用 | 用 `-UseMirror -CheckOnly` 确认镜像状态；换网络/等恢复；如需新增镜像请先核实域名声誉再写入 `mirror-lib.ps1` |
 | 某个镜像下载到一半报 "意外的 EOF" | 该镜像连接被中断 | 脚本会自动切下一个；无需人工干预，留意最终 `source=` 即可 |
 | 镜像返回 404 | 镜像不支持该路径格式，或原始文件不存在 | 先用 `-CheckOnly` 验证镜像本身；确认原始 URL 正确 |
 | SHA256 校验不符 | 镜像缓存了旧文件或内容被篡改 | 脚本会自动换镜像重试；若持续失败，改用官方 install.ps1 直连下载 |
