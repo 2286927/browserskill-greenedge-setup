@@ -1,12 +1,14 @@
-# detect_edge.ps1 - Detect portable ("green") Edge install, launcher, user data dir,
+﻿# detect_edge.ps1 - Detect portable ("green") Edge install, launcher, user data dir,
 # BrowserSkill extension, bsk CLI and daemon status. Prints one JSON object to stdout.
 # Read-only: this script never installs, starts or changes anything.
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File detect_edge.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File detect_edge.ps1 -EdgeDir "D:\Program Files\Microsoft Edge"
+#   powershell -NoProfile -ExecutionPolicy Bypass -File detect_edge.ps1 -SkipScan   # skip the bounded folder scan (fastest)
 param(
-    [string]$EdgeDir = ""
+    [string]$EdgeDir = "",
+    [switch]$SkipScan
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -17,28 +19,107 @@ function Test-ExePath([string]$p) {
     return $false
 }
 
-# ---- 1. Locate msedge.exe ----
-$found = $null
-if ($EdgeDir -ne "") {
+# ---- 1. Locate msedge.exe (4 strategies, cheapest first) ----
+function Find-ExeUnder([string]$root) {
+    if (-not $root) { return $null }
     foreach ($sub in @("App\msedge.exe", "Application\msedge.exe", "msedge.exe")) {
-        $p = Join-Path $EdgeDir $sub
-        if (Test-ExePath $p) { $found = $p; break }
+        $p = Join-Path $root $sub
+        if (Test-ExePath $p) { return $p }
     }
-} else {
-    $cands = New-Object System.Collections.ArrayList
-    foreach ($d in (Get-PSDrive -PSProvider FileSystem)) {
-        $r = $d.Root
-        # portable layouts first (App subdir is the typical green/repack layout)
-        [void]$cands.Add((Join-Path $r "Program Files\Microsoft Edge\App\msedge.exe"))
-        [void]$cands.Add((Join-Path $r "Program Files (x86)\Microsoft Edge\App\msedge.exe"))
-        [void]$cands.Add((Join-Path $r "Microsoft Edge\App\msedge.exe"))
-        # some repacks keep the standard Application subdir under a custom root
-        [void]$cands.Add((Join-Path $r "Program Files\Microsoft Edge\Application\msedge.exe"))
+    return $null
+}
+
+$driveRoots = @(Get-PSDrive -PSProvider FileSystem |
+    Where-Object { $_.Root -match '^[A-Za-z]:\\$' } |
+    ForEach-Object { $_.Root })
+
+$found = $null
+$foundVia = $null
+
+# 1a. explicit directory supplied by the caller
+if ($EdgeDir -ne "") {
+    $p = Find-ExeUnder $EdgeDir
+    if ($p) { $found = $p; $foundVia = "explicit -EdgeDir" }
+}
+
+# 1b. well-known locations on every fixed drive (covers portable / repack layouts)
+if (-not $found) {
+    $relCands = @(
+        "Program Files\Microsoft Edge\App\msedge.exe",
+        "Program Files (x86)\Microsoft Edge\App\msedge.exe",
+        "Program Files\Microsoft Edge\Application\msedge.exe",
+        "Program Files (x86)\Microsoft Edge\Application\msedge.exe",
+        "Microsoft Edge\App\msedge.exe",
+        "Apps\Microsoft Edge\App\msedge.exe",
+        "Software\Microsoft Edge\App\msedge.exe",
+        "Tools\Microsoft Edge\App\msedge.exe",
+        "Portable\Microsoft Edge\App\msedge.exe"
+    )
+    foreach ($r in $driveRoots) {
+        foreach ($rel in $relCands) {
+            $c = Join-Path $r $rel
+            if (Test-ExePath $c) { $found = $c; $foundVia = "well-known path"; break }
+        }
+        if ($found) { break }
     }
-    # official install locations (fallback / comparison)
-    [void]$cands.Add("$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe")
-    [void]$cands.Add("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe")
-    foreach ($c in $cands) { if (Test-ExePath $c) { $found = $c; break } }
+    if (-not $found) {
+        foreach ($c in @(
+            "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+        )) {
+            if (Test-ExePath $c) { $found = $c; $foundVia = "well-known path (official layout)"; break }
+        }
+    }
+}
+
+# 1c. registry App Paths (official installers and some repacks register the exe here)
+if (-not $found) {
+    foreach ($k in @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe"
+    )) {
+        $v = $null
+        try { $v = (Get-ItemProperty -Path $k -ErrorAction Stop).'(default)' } catch { $v = $null }
+        if ($v) {
+            $v = $v.Trim('"')
+            if (Test-ExePath $v) { $found = $v; $foundVia = "registry App Paths"; break }
+        }
+    }
+}
+
+# 1d. bounded scan for renamed / non-standard portable folders (depth 3, never full-disk)
+if (-not $found -and -not $SkipScan) {
+    $skipNames = '^(Windows|WindowsApps|Windows\.old|\$Recycle\.Bin|System Volume Information|Recovery|PerfLogs|node_modules|AppData)$'
+    $containerNames = '^(Program Files( \(x86\))?|Programs|Apps|Software|Tools|Green|Portable|Applications|应用|软件|工具|绿色|便携)$'
+    foreach ($r in $driveRoots) {
+        $lvl1 = @(Get-ChildItem -LiteralPath $r -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch $skipNames })
+        foreach ($a in $lvl1) {
+            # a\ 直接就是 Edge 目录
+            if ($a.Name -match 'Edge|msedge|浏览器') {
+                $p = Find-ExeUnder $a.FullName
+                if ($p) { $found = $p; $foundVia = "scan depth 1"; break }
+            }
+            # a\ 是容器目录（Program Files / Apps / Software ...）
+            if ($a.Name -match $containerNames) {
+                foreach ($b in @(Get-ChildItem -LiteralPath $a.FullName -Directory -ErrorAction SilentlyContinue)) {
+                    if ($b.Name -match 'Edge|msedge') {
+                        $p = Find-ExeUnder $b.FullName
+                        if ($p) { $found = $p; $foundVia = "scan depth 2"; break }
+                    }
+                    # 厂商子目录下的 Microsoft Edge（如 Program Files\Vendor\Microsoft Edge）
+                    $nested = Join-Path $b.FullName "Microsoft Edge"
+                    if (Test-Path -LiteralPath $nested -PathType Container) {
+                        $p = Find-ExeUnder $nested
+                        if ($p) { $found = $p; $foundVia = "scan depth 3"; break }
+                    }
+                }
+            }
+            if ($found) { break }
+        }
+        if ($found) { break }
+    }
 }
 
 $edgeInfo = $null
@@ -92,6 +173,7 @@ if ($found) {
 
     $edgeInfo = [ordered]@{
         found = $true
+        found_via = $foundVia
         exe = $found
         version = $version
         root = $edgeRoot
@@ -104,7 +186,17 @@ if ($found) {
         extension_locations = $extLocations
     }
 } else {
-    $edgeInfo = [ordered]@{ found = $false }
+    $edgeInfo = [ordered]@{
+        found = $false
+        searched = [ordered]@{
+            explicit_dir = $(if ($EdgeDir) { $EdgeDir } else { $null })
+            well_known_paths = $true
+            registry_app_paths = $true
+            bounded_scan = (-not $SkipScan)
+            drives = $driveRoots
+        }
+        hint = "Edge not found. Ask the user for the folder that contains msedge.exe and rerun with -EdgeDir '<folder>'."
+    }
 }
 
 # ---- 3. bsk CLI ----

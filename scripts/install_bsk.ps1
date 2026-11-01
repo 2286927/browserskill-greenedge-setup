@@ -1,15 +1,20 @@
 # install_bsk.ps1 - Install bsk CLI with a pinned integrity anchor.
 #
-# SECURITY MODEL (v1.1.2, revised after a supply-chain review):
+# SECURITY MODEL (v1.1.3):
 #  1. DEFAULT SOURCE ORDER: try GitHub official (origin) first; if unreachable,
 #     fall back to mirrors. Official source always has priority.
 #  2. -DirectOnly disables mirrors entirely (strictest); -UseMirror puts mirrors
 #     first for networks where github.com is blocked. Hosts previously flagged by
 #     threat intelligence were removed from mirror-lib.ps1.
-#  3. Integrity: artifact SHA256 values are PINNED in this file ($KnownSha256).
-#     Mirrors cannot substitute content: a modified artifact fails the checksum.
-#     If a version has no pinned value AND the manifest has none -> hard fail.
+#  3. Integrity - where the expected SHA256 may come from, in priority order:
+#       a) PINNED in this file ($KnownSha256)          -> always trusted
+#       b) official manifest, ONLY if that manifest was fetched from the official
+#          direct channel (github.com), never from a mirror
+#       c) otherwise                                   -> hard fail, no install
+#     Consequence: a checksum that travelled through a mirror is never trusted,
+#     and a mirror cannot substitute content (it would fail the checksum).
 #  4. The final download source and the verification result are printed explicitly.
+#  5. Only 'bsk --version' is executed after install; nothing else.
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File install_bsk.ps1
@@ -148,8 +153,10 @@ try {
     }
 
     $manifest = $null
+    $manifestMode = $null      # "direct" or "mirror" - decides whether its sha256 may be trusted
     $r = Fetch-Verified -Url $manifestUrl -OutFile (Join-Path $tmp "version.json") -Kind release -ExpectedSha "" -TimeoutSec $TimeoutSec -Quiet:$Quiet
     if ($r.ok) {
+        $manifestMode = $r.mode
         try { $manifest = Get-Content -LiteralPath (Join-Path $tmp "version.json") -Raw | ConvertFrom-Json } catch { $manifest = $null }
     } elseif (-not $Version) {
         Write-Warn "manifest unavailable; cannot resolve latest version"
@@ -160,7 +167,9 @@ try {
     if (-not $Version) { throw "could not determine bsk version" }
     Write-Log "version: $Version"
 
-    # ---------- 2. choose expected SHA256 (pinned value wins) ----------
+    # ---------- 2. choose expected SHA256 ----------
+    # Trust order: pinned-in-package  >  official manifest fetched over the official
+    # direct channel  >  hard fail. A checksum delivered through a mirror is never used.
     $asset = $null
     if ($manifest -and $manifest.assets) { $asset = $manifest.assets."windows-x64" }
     $manifestSha = if ($asset) { $asset.sha256 } else { "" }
@@ -168,10 +177,15 @@ try {
 
     if ($pinnedSha) {
         $expectedSha = $pinnedSha
-        Write-Log "checksum: pinned in package (independent of download channel)"
-    } elseif ($manifestSha) {
+        $shaSource = "pinned in package"
+        Write-Log "checksum: pinned in this package (independent of download channel)"
+    } elseif ($manifestSha -and $manifestMode -eq "direct") {
         $expectedSha = $manifestSha
-        Write-Warn "no pinned checksum for $Version; falling back to the official manifest value"
+        $shaSource = "official manifest (direct channel)"
+        Write-Warn "no pinned checksum for $Version; using the official manifest value, which was fetched directly from github.com (not through a mirror)"
+    } elseif ($manifestSha) {
+        # The only checksum on hand travelled through a third-party mirror.
+        throw ("no pinned checksum for bsk {0}, and the manifest value came from a mirror ({1}). Refusing to trust a checksum that went through a proxy. Pin it in `$KnownSha256 or rerun with -DirectOnly." -f $Version, $manifestMode)
     } else {
         # Hard fail: never install an artifact we cannot verify.
         throw "no SHA256 available for bsk $Version (not pinned in package, absent from manifest). Refusing to install."
@@ -196,6 +210,7 @@ try {
     Write-Host ""
     Write-Host "---- integrity report ----" -ForegroundColor Cyan
     Write-Host ("  source        : {0} ({1})" -f $r2.source, $r2.mode)
+    Write-Host ("  checksum from : {0}" -f $shaSource)
     Write-Host ("  expected sha256: {0}" -f $expectedSha)
     Write-Host ("  actual   sha256: {0}" -f $r2.sha256)
     Write-Host ("  verified      : {0}" -f $(if ($r2.sha256 -ieq $expectedSha) { "OK" } else { "MISMATCH" }))
@@ -278,9 +293,13 @@ try {
     Write-Host "note: the installer only ran 'bsk --version'. Review the skill before granting broader use."
 }
 catch {
+    $msg = $_.Exception.Message
     Write-Host ""
-    Write-Host ("FAILED: {0}" -f $_.Exception.Message) -ForegroundColor Red
-    if ($DirectOnly) {
+    Write-Host ("FAILED: {0}" -f $msg) -ForegroundColor Red
+    if ($msg -match 'checksum|SHA256|came from a mirror') {
+        Write-Host "hint: this is an integrity guard, not a network problem. Either pin this version in `$KnownSha256" -ForegroundColor Yellow
+        Write-Host "      (preferred), or use -DirectOnly so the manifest and the artifact both come from github.com." -ForegroundColor Yellow
+    } elseif ($DirectOnly) {
         Write-Host "hint: -DirectOnly restricts downloads to github.com. Drop it to allow mirror fallback." -ForegroundColor Yellow
     } else {
         Write-Host "hint: official source and mirrors both failed. Check network, or see references/deployment-guide.md." -ForegroundColor Yellow
