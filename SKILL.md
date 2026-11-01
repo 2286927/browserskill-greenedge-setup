@@ -43,11 +43,31 @@ Edge 未找到时，请用户提供 Edge 所在目录，用 `-EdgeDir` 重跑。
 
 ### 第 2 步：安装 bsk CLI（`bsk_cli.exists` 为 false 时）
 
+**优先使用镜像安装脚本（国内网络必需，GitHub 直连常超时）**：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk_mirror.ps1"
+```
+
+该脚本的行为（替代官方 install.ps1 的下载部分）：
+- 从多个镜像依次尝试获取 `version.json` 和 `bsk-*.zip`（`cdn.gh-proxy.org` → `gh-proxy.org` → `hk.gh-proxy.org` → …）
+- 每个镜像独立超时，失败自动切换下一个；全部失败时回退 GitHub 原始地址
+- 下载后做 SHA256 校验，校验不通过也视为失败并切换镜像
+- 解压 → 停旧 daemon → 替换 `~/.local/bin/bsk.exe` → 写用户 PATH 与 `~/.bashrc` → 验证 `--version`
+
+可选参数：`-Version 0.4.0`（固定版本）、`-CheckOnly`（只探测镜像连通性，不安装）、`-TimeoutSec 25`。
+镜像清单与拼接规则见 `references/deployment-guide.md`。
+
+**镜像脚本全部失败时，回退官方安装脚本**（需较稳定的 GitHub 直连）：
+
 1. 下载官方安装脚本到临时文件。**禁止 `irm ... | iex`——WorkBuddy 安全策略会拦截 Invoke-Expression**：
 
    ```powershell
    irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 -OutFile "$env:TEMP\bsk_install.ps1"
    ```
+
+   若该地址也超时，可先用镜像取回同一文件（raw 类镜像）：
+   `https://cdn.gh-proxy.org/https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1`
 
 2. 用 Read 审查脚本内容，确认它只做：从 Tencent/BrowserSkill Releases 下载 bsk.exe、SHA256 校验、解压到 `~/.local/bin`、写入用户 PATH。发现任何可疑行为立即停止并报告用户。
 3. 以 Bypass 策略执行已审查的脚本：
