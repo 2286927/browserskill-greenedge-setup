@@ -1,11 +1,14 @@
 # install_bsk.ps1 - Install bsk CLI with a pinned integrity anchor.
 #
-# SECURITY MODEL (v1.1.1, revised after a supply-chain review):
-#  1. DEFAULT: download only from GitHub directly (origin). No third-party proxy.
-#  2. Mirrors are OPT-IN (-UseMirror) for networks where github.com is unreachable.
-#     Hosts previously flagged by threat intelligence were removed from mirror-lib.ps1.
+# SECURITY MODEL (v1.1.2, revised after a supply-chain review):
+#  1. DEFAULT SOURCE ORDER: try GitHub official (origin) first; if unreachable,
+#     fall back to mirrors. Official source always has priority.
+#  2. -DirectOnly disables mirrors entirely (strictest); -UseMirror puts mirrors
+#     first for networks where github.com is blocked. Hosts previously flagged by
+#     threat intelligence were removed from mirror-lib.ps1.
 #  3. Integrity: artifact SHA256 values are PINNED in this file ($KnownSha256).
-#     If a version has no pinned value AND the manifest has none -> hard fail, never skip.
+#     Mirrors cannot substitute content: a modified artifact fails the checksum.
+#     If a version has no pinned value AND the manifest has none -> hard fail.
 #  4. The final download source and the verification result are printed explicitly.
 #
 # Usage:
@@ -22,6 +25,7 @@ param(
     [string]$InstallDir = "",
     [int]$TimeoutSec = 30,
     [switch]$UseMirror,
+    [switch]$DirectOnly,
     [switch]$CheckOnly,
     [switch]$Quiet
 )
@@ -45,14 +49,24 @@ if (-not $Version -and $env:BSK_VERSION) { $Version = $env:BSK_VERSION }
 function Write-Log($msg) { if (-not $Quiet) { Write-Host "==> $msg" -ForegroundColor Cyan } }
 function Write-Warn($msg) { Write-Host "!!  $msg" -ForegroundColor Yellow }
 
-# ---- source selection: origin only by default; mirrors are opt-in ----
+# ---- source selection ----
+# default      : official GitHub direct first, then opt-in mirrors as fallback
+# -DirectOnly  : official GitHub direct only (strictest)
+# -UseMirror   : mirrors first (fastest on networks where github.com is blocked), origin last
 function Get-Sources {
     param([string]$Kind)
     $list = @()
+    if ($DirectOnly) {
+        $list += @{ name = "origin"; mode = "direct" }
+        return $list
+    }
     if ($UseMirror) {
         foreach ($m in (Get-MirrorList -Kind $Kind)) { $list += @{ name = $m; mode = "mirror" } }
+        $list += @{ name = "origin"; mode = "direct" }
+        return $list
     }
     $list += @{ name = "origin"; mode = "direct" }
+    foreach ($m in (Get-MirrorList -Kind $Kind)) { $list += @{ name = $m; mode = "mirror" } }
     return $list
 }
 
@@ -106,8 +120,11 @@ function Fetch-Verified {
 
 # ---------- CheckOnly ----------
 if ($CheckOnly) {
-    Write-Log ("mode: {0}" -f $(if ($UseMirror) { "mirror + origin fallback (opt-in)" } else { "GitHub direct only (default)" }))
-    if ($UseMirror) {
+    $modeText = if ($DirectOnly) { "official GitHub direct only (-DirectOnly)" }
+                elseif ($UseMirror) { "mirrors first, origin last (-UseMirror)" }
+                else { "official GitHub direct first, mirrors as fallback (default)" }
+    Write-Log ("mode: {0}" -f $modeText)
+    if (-not $DirectOnly) {
         Write-Log "probing mirrors (HEAD request)"
         $rows = Test-Mirrors -Url "https://raw.githubusercontent.com/$Repo/main/README.md" -Kind "raw" -TimeoutSec $TimeoutSec
         $rows | Sort-Object -Property @{Expression={-$_.ok}},@{Expression={$_.ms}} | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
@@ -169,8 +186,8 @@ try {
     $r2 = Fetch-Verified -Url $downloadUrl -OutFile $archivePath -Kind release -ExpectedSha $expectedSha -TimeoutSec $TimeoutSec -Quiet:$Quiet
     if (-not $r2.ok) {
         Write-Warn "download failed on every allowed source"
-        if (-not $UseMirror) {
-            Write-Warn "if github.com is unreachable from your network, rerun with -UseMirror (opt-in third-party proxy)"
+        if ($DirectOnly) {
+            Write-Warn "you used -DirectOnly; drop it to allow mirror fallback when github.com is unreachable"
         }
         throw "archive download failed"
     }
@@ -263,9 +280,10 @@ try {
 catch {
     Write-Host ""
     Write-Host ("FAILED: {0}" -f $_.Exception.Message) -ForegroundColor Red
-    if (-not $UseMirror) {
-        Write-Host "hint: default mode uses GitHub directly. If github.com is blocked on this network," -ForegroundColor Yellow
-        Write-Host "      rerun with -UseMirror to allow opt-in third-party proxies (lower trust)." -ForegroundColor Yellow
+    if ($DirectOnly) {
+        Write-Host "hint: -DirectOnly restricts downloads to github.com. Drop it to allow mirror fallback." -ForegroundColor Yellow
+    } else {
+        Write-Host "hint: official source and mirrors both failed. Check network, or see references/deployment-guide.md." -ForegroundColor Yellow
     }
     exit 1
 }
