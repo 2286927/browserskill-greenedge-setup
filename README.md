@@ -24,7 +24,7 @@
 3. 对 WorkBuddy 智能体说：「帮我接入浏览器自动化」或「装一下 BrowserSkill」
 
 > 国内下载慢或失败时，在 zip 地址前加镜像前缀，例如：
-> `https://cdn.gh-proxy.org/https://github.com/2286927/browserskill-greenedge-setup/releases/download/v1.1.0/BrowserSkill绿装Edge接入技能.zip`
+> `https://gh-proxy.org/https://github.com/2286927/browserskill-greenedge-setup/releases/download/v1.1.1/BrowserSkill绿装Edge接入技能.zip`
 
 ### 方式二：git clone
 
@@ -33,33 +33,39 @@
 git clone https://github.com/2286927/browserskill-greenedge-setup.git ~/.workbuddy/skills/browserskill-greenedge-setup
 
 # 国内镜像（任选其一）
-git clone https://hk.gh-proxy.org/https://github.com/2286927/browserskill-greenedge-setup.git ~/.workbuddy/skills/browserskill-greenedge-setup
+git clone https://gh-proxy.org/https://github.com/2286927/browserskill-greenedge-setup.git ~/.workbuddy/skills/browserskill-greenedge-setup
 git clone https://githubfast.com/2286927/browserskill-greenedge-setup.git ~/.workbuddy/skills/browserskill-greenedge-setup
 ```
 
-## 国内网络加速（v1.1.0 新增）
+## 安全设计（v1.1.1）
 
-技能对 GitHub 的依赖已全部做镜像适配，**镜像失效会自动回退原始地址**：
-
-| 下载环节 | 加速方式 |
-|---|---|
-| bsk CLI 安装（version.json + zip） | `scripts/install_bsk_mirror.ps1` 自动多镜像尝试 + SHA256 校验 + 回退 origin |
-| install.ps1 脚本（回退方案） | Raw 类镜像前缀（如 `https://cdn.gh-proxy.org/https://raw.githubusercontent.com/...`） |
-| 技能自身 zip | Release 类镜像前缀（如 `https://cdn.gh-proxy.org/https://github.com/...`） |
-| git clone | Clone 类镜像（`hk.gh-proxy.org` / `githubfast.com` 等） |
-
-镜像清单与排障见 `references/deployment-guide.md` 第二节；探测镜像连通性：
+**默认从 GitHub 官方直连安装，不经过任何第三方代理**：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_bsk_mirror.ps1 -CheckOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_bsk.ps1
 ```
+
+完整性保障：
+
+- **包内固定官方制品的 SHA256**（`$KnownSha256`），校验锚点独立于下载通道，manifest 被篡改也无法通过
+- **拿不到校验值就直接失败**，绝不跳过校验安装
+- 安装完成后打印「下载源 / 期望哈希 / 实际哈希 / 校验结果」，用户可见
+- 安装过程只执行 `bsk --version`，不做其他动作
+
+**国内直连不通时（可选，较低信任通道）**：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_bsk.ps1 -UseMirror
+```
+
+镜像仅在显式开启时启用，且镜像下载的制品**仍须匹配包内固定 SHA256**。已被威胁情报标记的代理域名（`cdn.gh-proxy.org` / `ghfast.top` / `hk.gh-proxy.org`）已从列表移除。详见 `references/deployment-guide.md` 第二节。
 
 ## 使用
 
 安装后智能体自动触发，执行五步流程：
 
 1. **环境探测** — 运行 `scripts/detect_edge.ps1`（只读、无副作用），输出 JSON：Edge 路径/版本/绿装标志/启动方式/用户数据目录/扩展状态/CLI 状态/daemon 状态
-2. **安装 bsk CLI**（若缺）— 优先 `scripts/install_bsk_mirror.ps1`（镜像加速 + 校验 + 回退）；镜像全失败再走官方 install.ps1
+2. **安装 bsk CLI**（若缺）— 默认 `scripts/install_bsk.ps1`（官方直连 + 包内固定 SHA256 校验）；国内不通时加 `-UseMirror`
 3. **启动 daemon**（若缺）— WorkBuddy 托管后台任务方式，`BSK_AUTO_START=0` + `--foreground`
 4. **扩展配对** — 已装则自动连接；未装则给出 Edge 商店链接引导用户安装（浏览器侧需用户本人点一下）
 5. **验证 + 写入记忆** — `bsk doctor` 全绿 → example.com 端到端实测 → 把「浏览器任务默认走 BrowserSkill」写入该机长期记忆
@@ -72,7 +78,7 @@ browserskill-greenedge-setup/
 ├── scripts/
 │   ├── detect_edge.ps1               # 一键环境探测，输出 JSON
 │   ├── mirror-lib.ps1                # GitHub 镜像库（镜像列表 + 带重试的下载器）
-│   └── install_bsk_mirror.ps1        # 镜像加速安装 bsk（校验 + 回退 origin）
+│   └── install_bsk.ps1               # 安装 bsk（默认官方直连 + 包内固定 SHA256）
 └── references/deployment-guide.md    # 部署细节、镜像清单与故障排查表
 ```
 

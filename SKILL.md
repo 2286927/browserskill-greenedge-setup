@@ -43,37 +43,42 @@ Edge 未找到时，请用户提供 Edge 所在目录，用 `-EdgeDir` 重跑。
 
 ### 第 2 步：安装 bsk CLI（`bsk_cli.exists` 为 false 时）
 
-**优先使用镜像安装脚本（国内网络必需，GitHub 直连常超时）**：
+**默认从 GitHub 官方直连安装（安全优先）**：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk_mirror.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk.ps1"
 ```
 
-该脚本的行为（替代官方 install.ps1 的下载部分）：
-- 从多个镜像依次尝试获取 `version.json` 和 `bsk-*.zip`（`cdn.gh-proxy.org` → `gh-proxy.org` → `hk.gh-proxy.org` → …）
-- 每个镜像独立超时，失败自动切换下一个；全部失败时回退 GitHub 原始地址
-- 下载后做 SHA256 校验，校验不通过也视为失败并切换镜像
-- 解压 → 停旧 daemon → 替换 `~/.local/bin/bsk.exe` → 写用户 PATH 与 `~/.bashrc` → 验证 `--version`
+该脚本的完整性设计（v1.1.1 按供应链安全要求整改）：
 
-可选参数：`-Version 0.4.0`（固定版本）、`-CheckOnly`（只探测镜像连通性，不安装）、`-TimeoutSec 25`。
-镜像清单与拼接规则见 `references/deployment-guide.md`。
+- **默认只从 GitHub 官方地址直连下载**，不经过任何第三方代理
+- **包内固定官方制品的 SHA256**（脚本内 `$KnownSha256`），校验锚点独立于下载通道，manifest 被篡改也无法通过
+- **拿不到校验值就硬失败**，绝不跳过校验继续解压或执行
+- 下载后打印「最终下载源 / 期望 SHA256 / 实际 SHA256 / 校验结果」，用户可见
+- 安装完成后只执行 `bsk --version` 做可用性验证，不执行其他动作
 
-**镜像脚本全部失败时，回退官方安装脚本**（需较稳定的 GitHub 直连）：
+**国内网络确实无法直连时（可选，较低信任通道）**：
 
-1. 下载官方安装脚本到临时文件。**禁止 `irm ... | iex`——WorkBuddy 安全策略会拦截 Invoke-Expression**：
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>/scripts/install_bsk.ps1" -UseMirror
+```
+
+`-UseMirror` 才会启用镜像（顺序尝试后回退直连）。镜像列表见 `references/deployment-guide.md`；**已被威胁情报标记的代理域名已从列表移除**，且镜像下载仍必须通过与包内固定的 SHA256 比对才会被采用。
+
+**镜像也不可用时**：不要绕过校验，改为把官方安装命令交给用户，由用户自行审阅后执行：
+
+```powershell
+irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 -OutFile "$env:TEMP\bsk_install.ps1"
+# 审阅该脚本后再执行：
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\bsk_install.ps1"
+```
+
+**安全边界：禁止 `irm ... | iex` 一行式执行**（WorkBuddy 安全策略也会拦截 Invoke-Expression）。
+
+4. 用**绝对路径**验证（当前 shell 的 PATH 可能未刷新，一律用绝对路径）：
 
    ```powershell
-   irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 -OutFile "$env:TEMP\bsk_install.ps1"
-   ```
-
-   若该地址也超时，可先用镜像取回同一文件（raw 类镜像）：
-   `https://cdn.gh-proxy.org/https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1`
-
-2. 用 Read 审查脚本内容，确认它只做：从 Tencent/BrowserSkill Releases 下载 bsk.exe、SHA256 校验、解压到 `~/.local/bin`、写入用户 PATH。发现任何可疑行为立即停止并报告用户。
-3. 以 Bypass 策略执行已审查的脚本：
-
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\bsk_install.ps1"
+   & "$env:USERPROFILE\.local\bin\bsk.exe" --version
    ```
 
 4. 用**绝对路径**验证（当前 shell 的 PATH 可能未刷新，一律用绝对路径）：
