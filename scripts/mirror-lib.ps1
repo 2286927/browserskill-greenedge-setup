@@ -42,6 +42,26 @@ function Get-MirrorList {
     }
 }
 
+# Returns the HTTP proxy that Invoke-WebRequest should use, or $null.
+# Windows PowerShell 5.1 does NOT honour the http_proxy / https_proxy environment
+# variables (only curl does), so sandboxed hosts and corporate proxies silently
+# break every download unless the proxy is passed explicitly.
+function Get-BskProxy {
+    foreach ($n in @("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "ALL_PROXY", "all_proxy")) {
+        $v = [Environment]::GetEnvironmentVariable($n)
+        if ($v) { return $v.Trim() }
+    }
+    return $null
+}
+
+# Build Invoke-WebRequest arguments with proxy support (used by every download path).
+function New-BskRequestArgs {
+    param([hashtable]$Base)
+    $p = Get-BskProxy
+    if ($p) { $Base["Proxy"] = $p }
+    return $Base
+}
+
 # Probe reachability of each mirror for a small file; returns list of {name, ok, ms, status}
 function Test-Mirrors {
     param(
@@ -58,7 +78,10 @@ function Test-Mirrors {
         if (-not $t.uri) { continue }
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         try {
-            $resp = Invoke-WebRequest -Uri $t.uri -TimeoutSec $TimeoutSec -UseBasicParsing -Method Head -ErrorAction Stop
+            $reqArgs = New-BskRequestArgs -Base @{
+                Uri = $t.uri; TimeoutSec = $TimeoutSec; UseBasicParsing = $true; Method = "Head"; ErrorAction = "Stop"
+            }
+            $resp = Invoke-WebRequest @reqArgs
             $sw.Stop()
             $out += [pscustomobject]@{ mirror = $t.name; ok = $true; ms = $sw.ElapsedMilliseconds; status = $resp.StatusCode }
         } catch {

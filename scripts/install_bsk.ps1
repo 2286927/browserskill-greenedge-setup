@@ -1,19 +1,23 @@
 # install_bsk.ps1 - Install bsk CLI with a pinned integrity anchor.
 #
-# SECURITY MODEL (v1.1.3):
+# SECURITY MODEL (v1.1.4):
 #  1. DEFAULT SOURCE ORDER: try GitHub official (origin) first; if unreachable,
 #     fall back to mirrors. Official source always has priority.
-#  2. -DirectOnly disables mirrors entirely (strictest); -UseMirror puts mirrors
-#     first for networks where github.com is blocked. Hosts previously flagged by
-#     threat intelligence were removed from mirror-lib.ps1.
-#  3. Integrity - where the expected SHA256 may come from, in priority order:
-#       a) PINNED in this file ($KnownSha256)          -> always trusted
-#       b) official manifest, ONLY if that manifest was fetched from the official
-#          direct channel (github.com), never from a mirror
-#       c) otherwise                                   -> hard fail, no install
-#     Consequence: a checksum that travelled through a mirror is never trusted,
-#     and a mirror cannot substitute content (it would fail the checksum).
-#  4. The final download source and the verification result are printed explicitly.
+#  2. ALWAYS INSTALL THE LATEST RELEASE unless -Version is given explicitly.
+#     $KnownSha256 entries are integrity anchors, NOT version gates: a release that
+#     is not frozen here still installs normally (see rule 3b). Never downgrade a
+#     user to an old build just because this file has not been updated.
+#  3. Integrity - where the expected SHA256 may come from:
+#       a) pinned in this file ($KnownSha256) -> must match; any channel that
+#          disagrees is treated as tampering and aborts the install
+#       b) at least TWO independent channels (different mirror operators, or the
+#          official channel plus one mirror) report the SAME value -> accept it
+#       c) the official direct channel alone -> accept it
+#       d) a single proxy channel is the only source -> refuse to install
+#     Consequence: one compromised proxy cannot forge a checksum (it has no partner
+#     to agree with), while a genuinely new release still installs on day one.
+#  4. The final download source, where the checksum came from, and the verification
+#     result are printed explicitly.
 #  5. Only 'bsk --version' is executed after install; nothing else.
 #
 # Usage:
@@ -45,6 +49,7 @@ $GitHub = "https://github.com/$Repo"
 # ---- Pinned SHA256 of official artifacts (integrity anchor, independent of download channel) ----
 # Values are taken from the official release manifest once, reviewed, and frozen here.
 $KnownSha256 = @{
+    "0.4.1" = "f4a62af2dde31508188ea0c80feee11dbb62d9e7b7bf388f3f3a9856cfffb37d"
     "0.4.0" = "6feeb22e608e63e3049b2611cf48fce73daac2420945c35174c16e784cdb2677"
 }
 
@@ -98,7 +103,10 @@ function Fetch-Verified {
         if (-not $Quiet) { Write-Host ("    source: {0} ({1})" -f $s.name, $s.mode) -ForegroundColor DarkGray }
         try {
             if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
-            Invoke-WebRequest -Uri $uri -OutFile $OutFile -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
+            $reqArgs = New-BskRequestArgs -Base @{
+                Uri = $uri; OutFile = $OutFile; TimeoutSec = $TimeoutSec; UseBasicParsing = $true; ErrorAction = "Stop"
+            }
+            Invoke-WebRequest @reqArgs
 
             if (-not (Test-Path -LiteralPath $OutFile)) { throw "no output file" }
             $len = (Get-Item -LiteralPath $OutFile).Length
@@ -134,7 +142,8 @@ if ($CheckOnly) {
         $rows = Test-Mirrors -Url "https://raw.githubusercontent.com/$Repo/main/README.md" -Kind "raw" -TimeoutSec $TimeoutSec
         $rows | Sort-Object -Property @{Expression={-$_.ok}},@{Expression={$_.ms}} | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
     }
-    Write-Log ("pinned versions with built-in sha256: {0}" -f (($KnownSha256.Keys | Sort-Object) -join ", "))
+    Write-Log ("frozen checksums (extra anchors, NOT version gates): {0}" -f (($KnownSha256.Keys | Sort-Object) -join ", "))
+    Write-Log "behaviour: always installs the latest release; unfrozen releases are accepted when >=2 independent channels agree"
     exit 0
 }
 
@@ -142,53 +151,106 @@ $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("bsk-install-" + [Guid]::New
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 
 try {
-    # ---------- 1. resolve version ----------
+    # ---------- 1. resolve version + collect the checksum each channel reports ----------
+    # Always target the LATEST release unless the caller pins a version explicitly.
+    # Pins in $KnownSha256 are an extra anchor, never a version gate.
     if ($Version) {
         $Version = $Version -replace '^v', ''
         Write-Log "pinned version: $Version"
         $manifestUrl = "$GitHub/releases/download/cli-v$Version/version.json"
     } else {
         $manifestUrl = "$GitHub/releases/latest/download/version.json"
-        Write-Log "fetching version manifest"
+        Write-Log "resolving latest version from every allowed channel"
     }
 
-    $manifest = $null
-    $manifestMode = $null      # "direct" or "mirror" - decides whether its sha256 may be trusted
-    $r = Fetch-Verified -Url $manifestUrl -OutFile (Join-Path $tmp "version.json") -Kind release -ExpectedSha "" -TimeoutSec $TimeoutSec -Quiet:$Quiet
-    if ($r.ok) {
-        $manifestMode = $r.mode
-        try { $manifest = Get-Content -LiteralPath (Join-Path $tmp "version.json") -Raw | ConvertFrom-Json } catch { $manifest = $null }
-    } elseif (-not $Version) {
-        Write-Warn "manifest unavailable; cannot resolve latest version"
-        throw "version manifest download failed"
+    function Read-ManifestFromSource {
+        param($Source, [string]$Url, [int]$TimeoutSec)
+        $uri = Get-SourceUri -Source $Source -Url $Url
+        if (-not $uri) { return $null }
+        $f = Join-Path $tmp ("manifest-" + [Guid]::NewGuid().ToString("N") + ".json")
+        try {
+            $reqArgs = New-BskRequestArgs -Base @{
+                Uri = $uri; OutFile = $f; TimeoutSec = $TimeoutSec; UseBasicParsing = $true; ErrorAction = "Stop"
+            }
+            Invoke-WebRequest @reqArgs
+            $obj = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
+            $sha = $null
+            if ($obj.assets -and $obj.assets."windows-x64") { $sha = $obj.assets."windows-x64".sha256 }
+            return [pscustomobject]@{
+                channel = $Source.name; mode = $Source.mode; ok = $true; version = $obj.version; sha = $sha; error = $null
+            }
+        } catch {
+            return [pscustomobject]@{
+                channel = $Source.name; mode = $Source.mode; ok = $false; version = $null; sha = $null; error = $_.Exception.Message
+            }
+        } finally {
+            Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+        }
     }
 
-    if (-not $Version -and $manifest -and $manifest.version) { $Version = $manifest.version }
-    if (-not $Version) { throw "could not determine bsk version" }
+    $probes = @()
+    foreach ($s in (Get-Sources -Kind "release")) {
+        if (-not $Quiet) { Write-Host ("    probe: {0} ({1})" -f $s.name, $s.mode) -ForegroundColor DarkGray }
+        $pr = Read-ManifestFromSource -Source $s -Url $manifestUrl -TimeoutSec $TimeoutSec
+        if ($pr) { $probes += $pr }
+    }
+    $okProbes = @($probes | Where-Object { $_.ok })
+    if (-not $okProbes) { throw "version manifest unavailable from every allowed channel" }
+
+    if (-not $Version) {
+        $official = $okProbes | Where-Object { $_.mode -eq "direct" } | Select-Object -First 1
+        if ($official -and $official.version) {
+            $Version = $official.version
+        } else {
+            $Version = ($okProbes | Group-Object -Property { $_.version } | Sort-Object -Property Count -Descending | Select-Object -First 1).Name
+        }
+        if (-not $Version) { throw "could not determine bsk version" }
+        $newest = @($okProbes | ForEach-Object { $_.version } | Sort-Object -Unique)
+        if ($newest.Count -gt 1) {
+            Write-Warn ("channels report different versions ({0}); installing {1} (official answer wins, otherwise the most common)" -f ($newest -join ", "), $Version)
+        }
+    }
     Write-Log "version: $Version"
 
-    # ---------- 2. choose expected SHA256 ----------
-    # Trust order: pinned-in-package  >  official manifest fetched over the official
-    # direct channel  >  hard fail. A checksum delivered through a mirror is never used.
-    $asset = $null
-    if ($manifest -and $manifest.assets) { $asset = $manifest.assets."windows-x64" }
-    $manifestSha = if ($asset) { $asset.sha256 } else { "" }
+    # ---------- 2. decide the expected SHA256 ----------
+    # v1.1.4 rule: never block a newer release just because it is not frozen in this file.
+    #   a) pinned in package                -> must match, and any channel disagreeing is a red flag
+    #   b) >=2 independent channels agree   -> accept that value (one proxy cannot forge agreement)
+    #   c) the official direct channel says -> accept
+    #   d) anything else (single proxy only)-> refuse
     $pinnedSha = $KnownSha256[$Version]
+    $reports = @($okProbes | Where-Object { $_.version -eq $Version -and $_.sha })
+    $groups = @($reports | Group-Object -Property { $_.sha })
 
     if ($pinnedSha) {
         $expectedSha = $pinnedSha
         $shaSource = "pinned in package"
-        Write-Log "checksum: pinned in this package (independent of download channel)"
-    } elseif ($manifestSha -and $manifestMode -eq "direct") {
-        $expectedSha = $manifestSha
-        $shaSource = "official manifest (direct channel)"
-        Write-Warn "no pinned checksum for $Version; using the official manifest value, which was fetched directly from github.com (not through a mirror)"
-    } elseif ($manifestSha) {
-        # The only checksum on hand travelled through a third-party mirror.
-        throw ("no pinned checksum for bsk {0}, and the manifest value came from a mirror ({1}). Refusing to trust a checksum that went through a proxy. Pin it in `$KnownSha256 or rerun with -DirectOnly." -f $Version, $manifestMode)
+        Write-Log "checksum: pinned in this package"
+        $disagree = @($reports | Where-Object { $_.sha -ine $pinnedSha })
+        if ($disagree.Count -gt 0) {
+            throw ("pinned checksum for {0} is {1}, but {2} report a different value. Possible tampering - refusing to install." -f `
+                $Version, $pinnedSha, (($disagree | ForEach-Object { $_.channel + "=" + $_.sha }) -join "; "))
+        }
     } else {
-        # Hard fail: never install an artifact we cannot verify.
-        throw "no SHA256 available for bsk $Version (not pinned in package, absent from manifest). Refusing to install."
+        if ($groups.Count -eq 0) {
+            throw "no SHA256 available for bsk $Version (not pinned, absent from every manifest). Refusing to install."
+        }
+        if ($groups.Count -gt 1) {
+            throw ("channels disagree on the SHA256 for bsk {0}: {1}. Refusing to install." -f $Version,
+                (($groups | ForEach-Object { "$($_.Name) <= " + (($_.Group | ForEach-Object { $_.channel }) -join "/") }) -join " | "))
+        }
+        $winner = $groups[0]
+        $chans = @($winner.Group | ForEach-Object { $_.channel } | Select-Object -Unique)
+        $hasOfficial = @($winner.Group | Where-Object { $_.mode -eq "direct" }).Count -gt 0
+        if ($hasOfficial -or $chans.Count -ge 2) {
+            $expectedSha = $winner.Name
+            $shaSource = if ($hasOfficial) { "official manifest (direct)" } else { "agreed by $($chans.Count) channels: $($chans -join ', ')" }
+            if (-not $hasOfficial) {
+                Write-Warn ("$Version is not frozen in this package; using the SHA256 that $($chans.Count) independent channels agree on")
+            }
+        } else {
+            throw ("no trustworthy SHA256 for bsk {0}: only one proxy channel ({1}) reported a value. Use -DirectOnly, or let a second channel confirm it." -f $Version, ($chans -join ","))
+        }
     }
 
     # ---------- 3. download archive ----------
@@ -296,9 +358,10 @@ catch {
     $msg = $_.Exception.Message
     Write-Host ""
     Write-Host ("FAILED: {0}" -f $msg) -ForegroundColor Red
-    if ($msg -match 'checksum|SHA256|came from a mirror') {
-        Write-Host "hint: this is an integrity guard, not a network problem. Either pin this version in `$KnownSha256" -ForegroundColor Yellow
-        Write-Host "      (preferred), or use -DirectOnly so the manifest and the artifact both come from github.com." -ForegroundColor Yellow
+    if ($msg -match 'checksum|SHA256|disagree|tampering') {
+        Write-Host "hint: this is an integrity guard, not a network problem. It clears itself when a second" -ForegroundColor Yellow
+        Write-Host "      independent channel confirms the same checksum, or when you use -DirectOnly." -ForegroundColor Yellow
+        Write-Host "      Manual update path: references/manual-cli-update.md" -ForegroundColor Yellow
     } elseif ($DirectOnly) {
         Write-Host "hint: -DirectOnly restricts downloads to github.com. Drop it to allow mirror fallback." -ForegroundColor Yellow
     } else {
