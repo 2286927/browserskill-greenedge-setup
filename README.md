@@ -37,7 +37,7 @@ git clone https://gh-proxy.org/https://github.com/2286927/browserskill-greenedge
 git clone https://githubfast.com/2286927/browserskill-greenedge-setup.git ~/.workbuddy/skills/browserskill-greenedge-setup
 ```
 
-## 安全设计（v1.1.3）
+## 安全设计（v1.1.4）
 
 **默认：官方 GitHub 直连优先，直连不通才回退镜像**（兼顾安全与国内可用性）：
 
@@ -45,24 +45,30 @@ git clone https://githubfast.com/2286927/browserskill-greenedge-setup.git ~/.wor
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_bsk.ps1
 ```
 
+### 版本策略：永远装最新
+
+- 默认**永远安装最新正式版**，不锁定版本；只有显式 `-Version` 才装指定版本
+- `$KnownSha256` 里的固化值是**额外校验锚点，不是版本闸门**：新版本没被固化照样能装
+- 不会因为技能本身没更新，就把你留在旧 CLI 上（扩展协议升级后旧 CLI 会不兼容）
+
 ### 校验值信任规则（本技能的安全核心）
 
 | 顺序 | 期望 SHA256 来源 | 是否采信 | 行为 |
 |---|---|---|---|
-| 1 | 包内固化 `$KnownSha256` | 始终采信 | 与下载通道无关 |
-| 2 | 官方 manifest，且由 **github.com 直连**取得 | 采信 | 打印黄色提示：该版本未固化 |
-| 3 | 官方 manifest，但**来自镜像** | **不采信** | 硬失败退出，提示固化校验值或改用 `-DirectOnly` |
-| 4 | 两者都没有 | 不采信 | 硬失败退出，绝不跳过校验 |
+| a | 包内固化 `$KnownSha256` | 必须一致 | 任何渠道报出不同值 → 判定疑似篡改，**硬失败** |
+| b | **≥2 个独立渠道报同一个值**（不同镜像，或官方 + 镜像） | 采信 | 黄字提示：该版本未固化，采用 N 渠道一致值 |
+| c | 只有官方直连渠道给出值 | 采信 | 官方通道本身即权威 |
+| d | 只有一个代理渠道给出值 | **拒绝** | 无法交叉验证，硬失败 |
+| e | 任何渠道都拿不到 | 拒绝 | 硬失败，绝不跳过校验 |
 
 由此可得三条可核验的结论：
 
-- 经代理传输的校验值一律不可信 → 不存在「代理同时篡改制品与校验值」的路径
+- 单个被污染的中转节点**无法伪造「多方一致」**（规则 b/d），也无法让篡改包通过哈希校验
 - 镜像只可能让安装**失败**，不可能让被篡改的 bsk **装进来**
-- 未固化的新版本在纯镜像网络下会装不上——这是刻意的取舍：宁可装不上，不装不可验证的东西
+- 新版本发布当天就能装上，不需要等技能更新固化表
 
 ### 其他保障
 
-- **源优先级**：官方直连永远第一顺位，镜像只作失败回退
 - 安装完成后打印「下载源 / 校验值来源 / 期望哈希 / 实际哈希 / 校验结果」，用户可见
 - 安装过程只执行 `bsk --version`，不做其他动作
 - 已被威胁情报标记的代理域名（`cdn.gh-proxy.org` / `ghfast.top` / `hk.gh-proxy.org`）已从列表移除
@@ -103,8 +109,20 @@ browserskill-greenedge-setup/
 │   └── install_bsk.ps1                   # 装 bsk（源顺序 / 校验值信任规则 / -CheckOnly）
 └── references/
     ├── troubleshooting-quickref.md       # 一页速查表（先看这个）
+    ├── manual-cli-update.md              # 手动更新/回滚 CLI 的三种方式
     └── deployment-guide.md               # 设计取舍、镜像清单、卸载回滚、成因排查
 ```
+
+## 更新 CLI（扩展提示协议不同时）
+
+扩展弹窗提示「扩展协议 v1.8，CLI 协议 v1.7」或 `version_skew: true`，就是 CLI 该升级了：
+
+```powershell
+# 一条命令升到最新（脚本永远拉最新版）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_bsk.ps1
+```
+
+不想跑脚本、或脚本被完整性策略挡住时，用完全手工的方式（下载 → 核对 SHA256 → 覆盖 bsk.exe → 重启 daemon），见 `references/manual-cli-update.md`。
 
 ## 卸载与回滚
 
