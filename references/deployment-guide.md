@@ -47,20 +47,33 @@ D:\Program Files\Microsoft Edge\
 
 ## 三、bsk CLI 安装
 
-### 设计取舍（v1.1.3）
+### 设计取舍（v1.1.4）
 
 历史：v1.1.0 被 SkillHub 安全扫描判为「可疑风险」（安全健康度 55；科恩、云鼎两家实验室均判「可疑」，恶意行为检出 0），原因是：从第三方代理下载、SHA256 期望值也取自同一代理通道、缺校验时跳过校验。
 
-v1.1.2 在修复这些问题的同时保住了国内可用性（官方直连优先 + 镜像回退）。v1.1.3 补齐了最后一处不一致——**校验值来源的信任边界**，使「镜像不参与信任判断」这句话在代码层面真正成立。
+v1.1.2 保住了国内可用性（官方直连优先 + 镜像回退）；v1.1.3 补齐「校验值来源的信任边界」；**v1.1.4 修正了 v1.1.3 的过度收紧**——原先「未固化 + manifest 来自镜像 = 拒绝安装」会把人卡在旧版本上，现在改为**多渠道交叉验证**：只要两个独立渠道报同一个校验值就放行，版本永不被固化表锁死。
 
-### 校验值信任规则（v1.1.3 核心）
+### 版本策略（v1.1.4）
+
+- **默认永远安装最新正式版**，不锁定版本；只有显式 `-Version` 才装指定版本
+- `$KnownSha256` 是**额外锚点，不是版本闸门**：没固化的新版本照样能装
+- 固化值的作用是「更强的锚 + 篡改探测器」：一旦某渠道与固化值不符，立即中止
+
+### 校验值信任规则（v1.1.4 核心）
 
 | 顺序 | 期望 SHA256 来源 | 是否采信 | 行为 |
 |---|---|---|---|
-| 1 | 包内固化 `$KnownSha256` | ✅ 始终采信 | 与下载通道无关；当前固化 bsk 0.4.0 = `6feeb22e608e63e3049b2611cf48fce73daac2420945c35174c16e784cdb2677` |
-| 2 | 官方 manifest（`version.json`），**且该 manifest 由 github.com 直连取得** | ✅ 采信 | 打印黄色提示：该版本未固化，使用直连取得的官方值 |
-| 3 | 官方 manifest，但 manifest 来自镜像 | ❌ **不采信** | 硬失败退出，提示 pin 进 `$KnownSha256` 或改用 `-DirectOnly` |
-| 4 | 两者都没有 | ❌ | 硬失败退出，绝不跳过校验安装 |
+| a | 包内固化 `$KnownSha256` | ✅ 必须一致 | 任何渠道报出不同值 → 判定疑似篡改，**硬失败**；当前固化 `0.4.1` = `f4a62af2dde31508188ea0c80feee11dbb62d9e7b7bf388f3f3a9856cfffb37d`、`0.4.0` = `6feeb22e608e63e3049b2611cf48fce73daac2420945c35174c16e784cdb2677`（均经多镜像交叉比对确认） |
+| b | **≥2 个独立渠道报同一个值**（不同镜像，或官方 + 任一镜像） | ✅ 采信 | 打印黄色提示：该版本未固化，采用 N 个渠道一致的值 |
+| c | 只有官方直连渠道给出值 | ✅ 采信 | 官方通道本身即权威 |
+| d | 只有一个代理渠道给出值 | ❌ 拒绝 | 无法交叉验证，硬失败 |
+| e | 任何渠道都拿不到 | ❌ 拒绝 | 硬失败，绝不跳过校验安装 |
+
+推论（可以据此向审核/用户解释）：
+
+- 单个被污染的中转节点**无法**伪造「多方一致」的校验值（规则 b/d）
+- 即使它改包，下载后哈希必然与期望值不符 → 安装中止
+- 新版本发布当天即可安装，不需要等技能更新固化表
 
 推论（可以据此向审核/用户解释）：
 
@@ -84,10 +97,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>\scripts\insta
 powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>\scripts\install_bsk.ps1" -CheckOnly
 
 # 固定版本 / 调整超时
-powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>\scripts\install_bsk.ps1" -Version 0.4.0 -TimeoutSec 30
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>\scripts\install_bsk.ps1" -Version 0.4.1 -TimeoutSec 30
 ```
 
-安装流程：解析版本 → 确定校验值来源 → 逐源下载并校验 → 打印完整性报告 → 解压 → 停旧 daemon → 替换 `~/.local/bin/bsk.exe`（带重试，防文件锁）→ 写用户 PATH 与 `~/.bashrc` → 仅执行 `bsk --version` 验证。
+安装流程：向每个可用渠道探测版本与校验值 → 交叉验证决定期望 SHA256（规则 a–e）→ 逐源下载并校验 → 打印完整性报告 → 解压 → 停旧 daemon → 替换 `~/.local/bin/bsk.exe`（带重试，防文件锁）→ 写用户 PATH 与 `~/.bashrc` → 仅执行 `bsk --version` 验证。
+
+**完全手工更新（不跑脚本）**：见 `manual-cli-update.md`，含三种方式、逐条命令、回滚与占用排查。
 
 ### 镜像清单
 
@@ -143,8 +158,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\bsk_install.ps1"
 & "$env:USERPROFILE\.local\bin\bsk.exe" --version
 ```
 
-## 四、daemon 托管启动（WorkBuddy 宿主约束）
+### 代理环境（沙箱 / 公司代理下必看）
 
+Windows PowerShell 5.1 的 `Invoke-WebRequest` **不读 `http_proxy` / `https_proxy` 环境变量**（只有 curl 读），所以在 WorkBuddy 沙箱或公司代理环境里，会出现「curl 能下、脚本报『基础连接已经关闭: 发送时发生错误』」的怪现象。
+
+本技能已内置处理：`mirror-lib.ps1` 的 `Get-BskProxy` 会依次读取 `https_proxy` / `HTTPS_PROXY` / `http_proxy` / `HTTP_PROXY` / `ALL_PROXY`，由 `New-BskRequestArgs` 显式传给每个 `Invoke-WebRequest`（含镜像连通性探测）。无需手工设 `-Proxy`。
+
+排查时可直接自检：
+
+```powershell
+# 若这里输出一个地址，就说明当前环境依赖代理，脚本必须带上它
+$env:https_proxy; $env:http_proxy
+```
+
+## 四、daemon 托管启动（WorkBuddy 宿主约束）
 ### 为什么不能让它自己启动
 
 `bsk doctor` 报错 `cannot start an independent Windows daemon ... (os error 5)`：WorkBuddy 沙箱禁止 daemon 作为独立进程脱离 Job Object。这是宿主行为，不是权限配置问题，**不要反复重试自动启动**。
@@ -246,10 +273,11 @@ Copy-Item "$env:USERPROFILE\.workbuddy\skills\browserskill-greenedge-setup" "$en
 
 以下为本 skill 提炼来源机器（绿装 Edge 139，Windows 10 IoT Enterprise LTSC 2019）上的实测基线：
 
-- `bsk doctor` 全绿：daemon running / IPC identity / protocol 1.7 / extension connected / browser protocol compatible
-- 端到端：`session start` → `navigate example.com` → `observe` 读到页面文本与元素 ref（`@e1`/`@e2`）→ `session stop`
-- `status` 关键字段：`browser_name=edge`、`extension_version=0.4.0`、`version_skew=false`、`unresponsive=false`
+- `bsk doctor` 全绿：daemon running / IPC identity / **protocol 1.8** / extension connected / browser protocol compatible
+- 端到端：`session start` → `navigate` → `observe` 读到页面文本与元素 ref（`@e1`/`@e2`）→ `session stop`
+- `status` 关键字段：`browser_name=edge`、`extension_version=0.4.1`、`extension_protocol_version=1.8`、`version_skew=false`、`unresponsive=false`
 - `detect_edge.ps1`：`found_via=well-known path`、`is_portable=true`、markers 含 `App-dir`/`DataDir:Data`/`chrome++.ini(App)`、`browserskill_extension_installed=true`，耗时约 1.9s
-- `install_bsk.ps1` 默认模式：`source=origin(direct)`、`checksum from=pinned in package`、`verified=OK`、6,820,462 字节
+- `install_bsk.ps1` 默认模式（0.4.1）：`source=origin(direct)`、`checksum from=pinned in package`、`verified=OK`、6,888,737 字节
+- 0.4.0 → 0.4.1 升级场景：扩展协议 1.8 而 CLI 仍为 1.7 时，扩展弹窗会提示「协议版本不同，请及时升级」，装 0.4.1 后 `version_skew=false`
 
 在任何新机器上部署后，达到同等基线即视为接入成功。

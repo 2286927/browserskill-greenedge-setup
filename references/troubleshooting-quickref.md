@@ -21,8 +21,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>\scripts\detec
 | 扩展没连上（`browsers` 为空） | 让用户在扩展弹窗点「启用连接」，端口对照 `status` 的 `ws_port` |
 | 扩展没装 | 交给用户从 Edge 商店装：`microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg` |
 | `bsk: command not found` | 新 shell PATH 未刷新；直接用绝对路径 `& "$env:USERPROFILE\.local\bin\bsk.exe"` |
+| 扩展弹窗提示「扩展协议 v1.8，CLI 协议 v1.7，请及时升级」 | CLI 太旧：跑 `install_bsk.ps1` 升到最新（0.4.1+）；装完看 `status` 的 `version_skew` 应为 `false` |
+| PowerShell 下载报「基础连接已经关闭: 发送时发生错误」，但 curl 同地址正常 | PS 5.1 的 IWR 不读 `http_proxy`；本技能脚本已自动读代理，手工调用请加 `-Proxy $env:https_proxy` |
 | GitHub 超时 / `ERR_CONNECTION_CLOSED` | 默认会自动回退镜像；仍失败则加 `-UseMirror` |
-| `no pinned checksum ... came from a mirror` | 完整性保护，不是网络问题；改用 `-DirectOnly`，或把该版本 SHA256 固化进 `$KnownSha256` |
+| 报 `channels disagree on the SHA256` | 有渠道数据不一致，安全拦截；换 `-DirectOnly` 直连重试，或等镜像缓存刷新 |
+| 报 `only one proxy channel ... reported a value` | 只连通了一个镜像，不敢单一来源采信；换到能连通两个镜像的网络、或 `-DirectOnly`、或按 `manual-cli-update.md` 手动核对哈希 |
 | `no SHA256 available` | 拒绝安装不可验证的制品；先确认官方 release 正常，再固化校验值 |
 | `download failed on every allowed source` | `-CheckOnly` 看哪条通；换网络；新增镜像前先核实域名声誉 |
 | 下载报「意外的 EOF」/ 404 | 脚本会自动切源；持续失败用官方 `install.ps1` 兜底 |
@@ -33,7 +36,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<skill目录>\scripts\detec
 | `session start` 了但 `navigate` 无响应 | 让用户打开绿装 Edge（`App\msedge.exe` 或其启动器）后重试 |
 | 装完想撤销 | 见 `deployment-guide.md` 第五节「卸载与回滚」 |
 
-## 3. 两个方向性提醒
+## 3. 三条方向性提醒
 
-- **不要为了连通性削弱校验**：镜像只是传输通道，校验值必须来自包内固化值或官方直连的 manifest。
+- **永远装最新版**：`install_bsk.ps1` 默认拉最新；固化表只是加固锚点，不会把用户锁在旧版本。要装指定版本才用 `-Version`。
+- **不要为了连通性削弱校验**：校验值要么来自固化值，要么由两个独立渠道交叉确认；单代理来源一律拒绝。
 - **不要重启正在运行的 daemon**：客户端命令带 `BSK_AUTO_START=0` 即可复用，重启会打断用户正在进行的浏览器会话。
